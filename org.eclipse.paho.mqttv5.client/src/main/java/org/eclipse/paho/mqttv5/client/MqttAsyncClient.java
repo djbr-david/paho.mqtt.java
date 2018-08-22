@@ -23,9 +23,6 @@ package org.eclipse.paho.mqttv5.client;
 
 import java.io.ByteArrayOutputStream;
 import java.io.DataOutputStream;
-import java.lang.reflect.Field;
-import java.net.URI;
-import java.net.URISyntaxException;
 import java.util.Hashtable;
 import java.util.Properties;
 import java.util.Timer;
@@ -34,23 +31,18 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 
 import javax.net.SocketFactory;
-import javax.net.ssl.SSLSocketFactory;
-
 import org.eclipse.paho.mqttv5.client.internal.ClientComms;
 import org.eclipse.paho.mqttv5.client.internal.ConnectActionListener;
 import org.eclipse.paho.mqttv5.client.internal.DisconnectedMessageBuffer;
-import org.eclipse.paho.mqttv5.client.internal.MqttSession;
+import org.eclipse.paho.mqttv5.client.internal.MqttConnectionState;
+import org.eclipse.paho.mqttv5.client.internal.MqttSessionState;
 import org.eclipse.paho.mqttv5.client.internal.NetworkModule;
-import org.eclipse.paho.mqttv5.client.internal.SSLNetworkModule;
-import org.eclipse.paho.mqttv5.client.internal.TCPNetworkModule;
+import org.eclipse.paho.mqttv5.client.internal.NetworkModuleService;
 import org.eclipse.paho.mqttv5.client.logging.Logger;
 import org.eclipse.paho.mqttv5.client.logging.LoggerFactory;
 import org.eclipse.paho.mqttv5.client.persist.MemoryPersistence;
 import org.eclipse.paho.mqttv5.client.persist.MqttDefaultFilePersistence;
-import org.eclipse.paho.mqttv5.client.security.SSLSocketFactoryFactory;
 import org.eclipse.paho.mqttv5.client.util.Debug;
-import org.eclipse.paho.mqttv5.client.websocket.WebSocketNetworkModule;
-import org.eclipse.paho.mqttv5.client.websocket.WebSocketSecureNetworkModule;
 import org.eclipse.paho.mqttv5.common.ExceptionHelper;
 import org.eclipse.paho.mqttv5.common.MqttException;
 import org.eclipse.paho.mqttv5.common.MqttMessage;
@@ -65,6 +57,7 @@ import org.eclipse.paho.mqttv5.common.packet.MqttPublish;
 import org.eclipse.paho.mqttv5.common.packet.MqttReturnCode;
 import org.eclipse.paho.mqttv5.common.packet.MqttSubscribe;
 import org.eclipse.paho.mqttv5.common.packet.MqttUnsubscribe;
+import org.eclipse.paho.mqttv5.common.util.MqttTopicValidator;
 
 /**
  * Lightweight client for talking to an MQTT server using non-blocking methods
@@ -96,9 +89,9 @@ import org.eclipse.paho.mqttv5.common.packet.MqttUnsubscribe;
  * hence can be lost if the client, Java runtime or device shuts down.
  * </p>
  * <p>
- * If connecting with {@link MqttConnectionOptions#setCleanSession(boolean)} set
+ * If connecting with {@link MqttConnectionOptions#setCleanStart(boolean)} set
  * to true it is safe to use memory persistence as all state is cleared when a
- * client disconnects. If connecting with cleanSession set to false in order to
+ * client disconnects. If connecting with cleanStart set to false in order to
  * provide reliable message delivery then a persistent message store such as the
  * default one should be used.
  * </p>
@@ -251,7 +244,13 @@ public class MqttAsyncClient implements MqttClientInterface, IMqttAsyncClient {
 												// second
 	private boolean reconnecting = false;
 	private static Object clientLock = new Object(); // Simple lock
-	private MqttSession mqttSession = new MqttSession();
+
+	// Variables that exist within the life of an MQTT session
+	private MqttSessionState mqttSession = new MqttSessionState();
+
+	// Variables that exist within the life of an MQTT connection.
+	private MqttConnectionState mqttConnection = new MqttConnectionState(); 
+	
 	private ScheduledExecutorService executorService;
 	private MqttPingSender pingSender;
 
@@ -421,9 +420,9 @@ public class MqttAsyncClient implements MqttClientInterface, IMqttAsyncClient {
 	 * {@link MqttClientPersistence} interface. An implementer of this interface
 	 * that safely stores messages must be specified in order for delivery of
 	 * messages to be reliable. In addition
-	 * {@link MqttConnectionOptions#setCleanSession(boolean)} must be set to false.
-	 * In the event that only QoS 0 messages are sent or received or cleanSession is
-	 * set to true then a safe store is not needed.
+	 * {@link MqttConnectionOptions#setCleanStart(boolean)} must be set to false. In
+	 * the event that only QoS 0 messages are sent or received or cleanStart is set
+	 * to true then a safe store is not needed.
 	 * </p>
 	 * <p>
 	 * An implementation of file-based persistence is provided in class
@@ -524,9 +523,9 @@ public class MqttAsyncClient implements MqttClientInterface, IMqttAsyncClient {
 	 * {@link MqttClientPersistence} interface. An implementer of this interface
 	 * that safely stores messages must be specified in order for delivery of
 	 * messages to be reliable. In addition
-	 * {@link MqttConnectionOptions#setCleanSession(boolean)} must be set to false.
-	 * In the event that only QoS 0 messages are sent or received or cleanSession is
-	 * set to true then a safe store is not needed.
+	 * {@link MqttConnectionOptions#setCleanStart(boolean)} must be set to false. In
+	 * the event that only QoS 0 messages are sent or received or cleanStart is set
+	 * to true then a safe store is not needed.
 	 * </p>
 	 * <p>
 	 * An implementation of file-based persistence is provided in class
@@ -572,16 +571,15 @@ public class MqttAsyncClient implements MqttClientInterface, IMqttAsyncClient {
 			DataOutputStream dos = new DataOutputStream(baos);
 			MqttDataTypes.encodeUTF8(dos, clientId);
 			// Remove the two size bytes.
-			if(dos.size() - 2 > 65535) {
+			if (dos.size() - 2 > 65535) {
 				throw new IllegalArgumentException("ClientId longer than 65535 characters");
 			}
-			
+
 		} else {
 			clientId = "";
 		}
-		
 
-		MqttConnectionOptions.validateURI(serverURI);
+		NetworkModuleService.validateURI(serverURI);
 
 		this.serverURI = serverURI;
 		this.mqttSession.setClientId(clientId);
@@ -605,7 +603,8 @@ public class MqttAsyncClient implements MqttClientInterface, IMqttAsyncClient {
 		log.fine(CLASS_NAME, methodName, "101", new Object[] { clientId, serverURI, persistence });
 
 		this.persistence.open(clientId);
-		this.comms = new ClientComms(this, this.persistence, this.pingSender, this.executorService, this.mqttSession);
+		this.comms = new ClientComms(this, this.persistence, this.pingSender, this.executorService, this.mqttSession,
+				this.mqttConnection);
 		this.persistence.close();
 		this.topics = new Hashtable<String, MqttTopic>();
 
@@ -676,129 +675,9 @@ public class MqttAsyncClient implements MqttClientInterface, IMqttAsyncClient {
 		// @TRACE 115=URI={0}
 		log.fine(CLASS_NAME, methodName, "115", new Object[] { address });
 
-		NetworkModule netModule;
-		SocketFactory factory = options.getSocketFactory();
 
-		MqttConnectionOptions.UriType serverURIType = MqttConnectionOptions.validateURI(address);
+		NetworkModule netModule = NetworkModuleService.createInstance(address, options, mqttSession.getClientId());
 
-		URI uri;
-		try {
-			uri = new URI(address);
-			// If the returned uri contains no host and the address contains underscores,
-			// then it's likely that Java did not parse the URI
-			if (uri.getHost() == null && address.contains("_")) {
-				try {
-					final Field hostField = URI.class.getDeclaredField("host");
-					hostField.setAccessible(true);
-					// Get everything after the scheme://
-					String shortAddress = address.substring(uri.getScheme().length() + 3);
-					hostField.set(uri, getHostName(shortAddress));
-
-				} catch (NoSuchFieldException | SecurityException | IllegalArgumentException
-						| IllegalAccessException e) {
-					throw ExceptionHelper.createMqttException(e.getCause());
-				}
-
-			}
-		} catch (URISyntaxException e) {
-			throw new IllegalArgumentException("Malformed URI: " + address + ", " + e.getMessage());
-		}
-
-		String host = uri.getHost();
-		int port = uri.getPort(); // -1 if not defined
-
-		switch (serverURIType) {
-		case TCP:
-			if (port == -1) {
-				port = 1883;
-			}
-			if (factory == null) {
-				factory = SocketFactory.getDefault();
-			} else if (factory instanceof SSLSocketFactory) {
-				throw ExceptionHelper.createMqttException(MqttClientException.REASON_CODE_SOCKET_FACTORY_MISMATCH);
-			}
-			netModule = new TCPNetworkModule(factory, host, port, this.mqttSession.getClientId());
-			((TCPNetworkModule) netModule).setConnectTimeout(options.getConnectionTimeout());
-			break;
-		case SSL:
-			if (port == -1) {
-				port = 8883;
-			}
-			SSLSocketFactoryFactory factoryFactory = null;
-			if (factory == null) {
-				// try {
-				factoryFactory = new SSLSocketFactoryFactory();
-				Properties sslClientProps = options.getSSLProperties();
-				if (null != sslClientProps)
-					factoryFactory.initialize(sslClientProps, null);
-				factory = factoryFactory.createSocketFactory(null);
-				// }
-				// catch (MqttDirectException ex) {
-				// throw ExceptionHelper.createMqttException(ex.getCause());
-				// }
-			} else if ((factory instanceof SSLSocketFactory) == false) {
-				throw ExceptionHelper.createMqttException(MqttClientException.REASON_CODE_SOCKET_FACTORY_MISMATCH);
-			}
-
-			// Create the network module...
-			netModule = new SSLNetworkModule((SSLSocketFactory) factory, host, port, this.mqttSession.getClientId());
-			((SSLNetworkModule) netModule).setSSLhandshakeTimeout(options.getConnectionTimeout());
-			((SSLNetworkModule) netModule).setSSLHostnameVerifier(options.getSSLHostnameVerifier());
-			((SSLNetworkModule) netModule)
-					.setHttpsHostnameVerificationEnabled(options.isHttpsHostnameVerificationEnabled());
-			// Ciphers suites need to be set, if they are available
-			if (factoryFactory != null) {
-				String[] enabledCiphers = factoryFactory.getEnabledCipherSuites(null);
-				if (enabledCiphers != null) {
-					((SSLNetworkModule) netModule).setEnabledCiphers(enabledCiphers);
-				}
-			}
-			break;
-		case WS:
-			if (port == -1) {
-				port = 80;
-			}
-			if (factory == null) {
-				factory = SocketFactory.getDefault();
-			} else if (factory instanceof SSLSocketFactory) {
-				throw ExceptionHelper.createMqttException(MqttClientException.REASON_CODE_SOCKET_FACTORY_MISMATCH);
-			}
-			netModule = new WebSocketNetworkModule(factory, address, host, port, this.mqttSession.getClientId());
-			((WebSocketNetworkModule) netModule).setConnectTimeout(options.getConnectionTimeout());
-			break;
-		case WSS:
-			if (port == -1) {
-				port = 443;
-			}
-			SSLSocketFactoryFactory wSSFactoryFactory = null;
-			if (factory == null) {
-				wSSFactoryFactory = new SSLSocketFactoryFactory();
-				Properties sslClientProps = options.getSSLProperties();
-				if (null != sslClientProps)
-					wSSFactoryFactory.initialize(sslClientProps, null);
-				factory = wSSFactoryFactory.createSocketFactory(null);
-
-			} else if ((factory instanceof SSLSocketFactory) == false) {
-				throw ExceptionHelper.createMqttException(MqttClientException.REASON_CODE_SOCKET_FACTORY_MISMATCH);
-			}
-
-			// Create the network module...
-			netModule = new WebSocketSecureNetworkModule((SSLSocketFactory) factory, address, host, port,
-					this.mqttSession.getClientId());
-			((WebSocketSecureNetworkModule) netModule).setSSLhandshakeTimeout(options.getConnectionTimeout());
-			// Ciphers suites need to be set, if they are available
-			if (wSSFactoryFactory != null) {
-				String[] enabledCiphers = wSSFactoryFactory.getEnabledCipherSuites(null);
-				if (enabledCiphers != null) {
-					((SSLNetworkModule) netModule).setEnabledCiphers(enabledCiphers);
-				}
-			}
-			break;
-		default:
-			// This shouldn't happen, as long as validateURI() has been called.
-			log.fine(CLASS_NAME, methodName, "119", new Object[] { address });
-			netModule = null;
-		}
 		return netModule;
 	}
 
@@ -879,10 +758,10 @@ public class MqttAsyncClient implements MqttClientInterface, IMqttAsyncClient {
 		this.userContext = userContext;
 		final boolean automaticReconnect = options.isAutomaticReconnect();
 
-		// @TRACE 103=cleanSession={0} connectionTimeout={1} TimekeepAlive={2}
+		// @TRACE 103=cleanStart={0} connectionTimeout={1} TimekeepAlive={2}
 		// userName={3} password={4} will={5} userContext={6} callback={7}
 		log.fine(CLASS_NAME, methodName, "103",
-				new Object[] { Boolean.valueOf(options.isCleanSession()), new Integer(options.getConnectionTimeout()),
+				new Object[] { Boolean.valueOf(options.isCleanStart()), new Integer(options.getConnectionTimeout()),
 						new Integer(options.getKeepAliveInterval()), options.getUserName(),
 						((null == options.getPassword()) ? "[null]" : "[notnull]"),
 						((null == options.getWillMessage()) ? "[null]" : "[notnull]"), userContext, callback });
@@ -893,11 +772,11 @@ public class MqttAsyncClient implements MqttClientInterface, IMqttAsyncClient {
 		// succeeds
 		MqttToken userToken = new MqttToken(getClientId());
 		ConnectActionListener connectActionListener = new ConnectActionListener(this, persistence, comms, options,
-				userToken, userContext, callback, reconnecting, mqttSession);
+				userToken, userContext, callback, reconnecting, mqttSession, mqttConnection);
 		userToken.setActionCallback(connectActionListener);
 		userToken.setUserContext(this);
-		
-		this.mqttSession.setSendReasonMessages(this.connOpts.isSendReasonMessages());
+
+		this.mqttConnection.setSendReasonMessages(this.connOpts.isSendReasonMessages());
 
 		// If we are using the MqttCallbackExtended, set it on the
 		// connectActionListener
@@ -905,15 +784,12 @@ public class MqttAsyncClient implements MqttClientInterface, IMqttAsyncClient {
 			connectActionListener.setMqttCallbackExtended((MqttCallback) this.mqttCallback);
 		}
 
-		if (this.connOpts.isCleanSession()) {
-			this.mqttSession.clearSession();
+		if (this.connOpts.isCleanStart()) {
+			this.mqttSession.clearSessionState();
 		}
+		this.mqttConnection.clearConnectionState();
 
-		if (this.connOpts.isCleanSession()) {
-			this.mqttSession.clearSession();
-		}
-
-		this.mqttSession.setIncomingTopicAliasMax(this.connOpts.getTopicAliasMaximum());
+		this.mqttConnection.setIncomingTopicAliasMax(this.connOpts.getTopicAliasMaximum());
 
 		comms.setNetworkModuleIndex(0);
 		connectActionListener.connect();
@@ -1134,7 +1010,7 @@ public class MqttAsyncClient implements MqttClientInterface, IMqttAsyncClient {
 	 *             if the topic contains a '+' or '#' wildcard character.
 	 */
 	protected MqttTopic getTopic(String topic) {
-		MqttTopic.validate(topic, false/* wildcards NOT allowed */);
+		MqttTopicValidator.validate(topic, false/* wildcards NOT allowed */, true);
 
 		MqttTopic result = (MqttTopic) topics.get(topic);
 		if (result == null) {
@@ -1200,7 +1076,7 @@ public class MqttAsyncClient implements MqttClientInterface, IMqttAsyncClient {
 		return this.subscribe(new MqttSubscription[] { new MqttSubscription(topicFilter, qos) }, null, null,
 				new MqttProperties());
 	}
-	
+
 	/*
 	 * (non-Javadoc)
 	 * 
@@ -1210,8 +1086,7 @@ public class MqttAsyncClient implements MqttClientInterface, IMqttAsyncClient {
 	 */
 	@Override
 	public IMqttToken subscribe(MqttSubscription subscription) throws MqttException {
-		return this.subscribe(new MqttSubscription[] { subscription }, null, null,
-				new MqttProperties());
+		return this.subscribe(new MqttSubscription[] { subscription }, null, null, new MqttProperties());
 	}
 
 	/*
@@ -1240,9 +1115,13 @@ public class MqttAsyncClient implements MqttClientInterface, IMqttAsyncClient {
 			MqttProperties subscriptionProperties) throws MqttException {
 		final String methodName = "subscribe";
 
-		// remove any message handlers for individual topics
+		// remove any message handlers for individual topics and validate Topics
 		for (int i = 0; i < subscriptions.length; ++i) {
 			this.comms.removeMessageListener(subscriptions[i].getTopic());
+			// Check if the topic filter is valid before subscribing
+			MqttTopicValidator.validate(subscriptions[i].getTopic(),
+					this.mqttConnection.isWildcardSubscriptionsAvailable(),
+					this.mqttConnection.isSharedSubscriptionsAvailable());
 		}
 
 		// Only Generate Log string if we are logging at FINE level
@@ -1253,9 +1132,6 @@ public class MqttAsyncClient implements MqttClientInterface, IMqttAsyncClient {
 					subs.append(", ");
 				}
 				subs.append(subscriptions[i].toString());
-
-				// Check if the topic filter is valid before subscribing
-				MqttTopic.validate(subscriptions[i].getTopic(), true/* allow wildcards */);
 			}
 			// @TRACE 106=Subscribe topicFilter={0} userContext={1} callback={2}
 			log.fine(CLASS_NAME, methodName, "106", new Object[] { subs.toString(), userContext, callback });
@@ -1365,14 +1241,15 @@ public class MqttAsyncClient implements MqttClientInterface, IMqttAsyncClient {
 		int subId = subscriptionProperties.getSubscriptionIdentifiers().get(0);
 
 		// Automatic Subscription Identifier Assignment is enabled
-		if (connOpts.useSubscriptionIdentifiers()) {
+		if (connOpts.useSubscriptionIdentifiers() && this.mqttConnection.isSubscriptionIdentifiersAvailable()) {
 
 			// Application is overriding the subscription Identifier
 			if (subId != 0) {
 				// Check that we are not already using this ID, else throw Illegal Argument
 				// Exception
 				if (this.comms.doesSubscriptionIdentifierExist(subId)) {
-					throw new IllegalArgumentException("The Subscription Identifier " + subId + " already exists.");
+					throw new IllegalArgumentException(
+							String.format("The Subscription Identifier %s already exists.", subId));
 				}
 
 			} else {
@@ -1459,7 +1336,7 @@ public class MqttAsyncClient implements MqttClientInterface, IMqttAsyncClient {
 			// Although we already checked when subscribing, but invalid
 			// topic filter is meanless for unsubscribing, just prohibit it
 			// to reduce unnecessary control packet send to broker.
-			MqttTopic.validate(topicFilters[i], true/* allow wildcards */);
+			MqttTopicValidator.validate(topicFilters[i], true/* allow wildcards */, this.mqttConnection.isSharedSubscriptionsAvailable());
 		}
 
 		// remove message handlers from the list for this client
@@ -1588,7 +1465,7 @@ public class MqttAsyncClient implements MqttClientInterface, IMqttAsyncClient {
 		log.fine(CLASS_NAME, methodName, "111", new Object[] { topic, userContext, callback });
 
 		// Checks if a topic is valid when publishing a message.
-		MqttTopic.validate(topic, false/* wildcards NOT allowed */);
+		MqttTopicValidator.validate(topic, false/* wildcards NOT allowed */, true);
 
 		MqttDeliveryToken token = new MqttDeliveryToken(getClientId());
 		token.setActionCallback(callback);

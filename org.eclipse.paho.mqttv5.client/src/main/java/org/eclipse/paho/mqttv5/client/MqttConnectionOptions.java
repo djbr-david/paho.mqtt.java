@@ -18,24 +18,26 @@
  */
 package org.eclipse.paho.mqttv5.client;
 
-import java.net.URI;
-import java.net.URISyntaxException;
+import java.util.Collections;
 import java.util.List;
+import java.util.Map;
 import java.util.Properties;
 
 import javax.net.SocketFactory;
 import javax.net.ssl.HostnameVerifier;
 
+import org.eclipse.paho.mqttv5.client.internal.NetworkModuleService;
 import org.eclipse.paho.mqttv5.client.util.Debug;
 import org.eclipse.paho.mqttv5.common.MqttMessage;
 import org.eclipse.paho.mqttv5.common.packet.MqttProperties;
 import org.eclipse.paho.mqttv5.common.packet.UserProperty;
+import org.eclipse.paho.mqttv5.common.util.MqttTopicValidator;
 
 /**
  * Holds the set of options that control how the client connects to a server.
  * 
- * Constructs a new {@link MqttConnectionOptions} object using the
- * default values.
+ * Constructs a new {@link MqttConnectionOptions} object using the default
+ * values.
  *
  * The defaults are:
  * <ul>
@@ -52,10 +54,6 @@ import org.eclipse.paho.mqttv5.common.packet.UserProperty;
  */
 public class MqttConnectionOptions {
 
-	enum UriType {
-		TCP, SSL, WS, WSS
-	}
-
 	private static final String CLIENT_ID_PREFIX = "paho";
 
 	// Connection Behaviour Properties
@@ -69,8 +67,7 @@ public class MqttConnectionOptions {
 	private boolean httpsHostnameVerificationEnabled = true;
 	private int maxReconnectDelay = 128000;
 	private boolean sendReasonMessages = false;
-	
-	
+
 	public MqttProperties getConnectionProperties() {
 		MqttProperties connectionProperties = new MqttProperties();
 		connectionProperties.setSessionExpiryInterval(sessionExpiryInterval);
@@ -85,7 +82,6 @@ public class MqttConnectionOptions {
 		return connectionProperties;
 	}
 
-
 	public MqttProperties getWillMessageProperties() {
 		return willMessageProperties;
 	}
@@ -98,13 +94,13 @@ public class MqttConnectionOptions {
 
 	// Connection packet properties
 	private int mqttVersion = 5; // MQTT Version 5
-	private boolean cleanSession = true; // Clean Session
+	private boolean cleanStart = true; // Clean Session
 	private String willDestination = null; // Will Topic
 	private MqttMessage willMessage = null; // Will Message
 	private String userName; // Username
 	private byte[] password; // Password
 	private Long sessionExpiryInterval = null; // The Session expiry Interval in seconds, null is the default of
-													// never.
+												// never.
 	private Integer receiveMaximum = null; // The Receive Maximum, null defaults to 65,535, cannot be 0.
 	private Long maximumPacketSize = null; // The Maximum packet size, null defaults to no limit.
 	private Integer topicAliasMaximum = null; // The Topic Alias Maximum, null defaults to 0.
@@ -118,6 +114,10 @@ public class MqttConnectionOptions {
 	private SocketFactory socketFactory; // SocketFactory to be used to connect
 	private Properties sslClientProps = null; // SSL Client Properties
 	private HostnameVerifier sslHostnameVerifier = null; // SSL Hostname Verifier
+	private Map<String, String> customWebSocketHeaders;
+
+	// Client Operation Parameters
+	private int executorServiceTimeout = 1; // How long to wait in seconds when terminating the executor service.
 
 	/**
 	 * Returns the MQTT version.
@@ -201,7 +201,7 @@ public class MqttConnectionOptions {
 		if (topic == null || message == null || message.getPayload() == null) {
 			throw new IllegalArgumentException();
 		}
-		MqttTopic.validate(topic, false); // Wildcards are not allowed
+		MqttTopicValidator.validate(topic, false, true); // Wildcards are not allowed
 		this.willDestination = topic;
 		this.willMessage = message;
 		// Prevent any more changes to the will message
@@ -214,36 +214,67 @@ public class MqttConnectionOptions {
 	 * 
 	 * @return the clean session flag
 	 */
-	public boolean isCleanSession() {
-		return this.cleanSession;
+	public boolean isCleanStart() {
+		return this.cleanStart;
 	}
 
 	/**
 	 * Sets whether the client and server should remember state across restarts and
-	 * reconnects.
+	 * reconnects. If set to false, the server will retain the session state until
+	 * either:
 	 * <ul>
-	 * <li>If set to false both the client and server will maintain state across
-	 * restarts of the client, the server and the connection. As state is
-	 * maintained:
-	 * <ul>
-	 * <li>Message delivery will be reliable meeting the specified QOS even if the
-	 * client, server or connection are restarted.
-	 * <li>The server will treat a subscription as durable.
-	 * </ul>
-	 * <li>If set to true the client and server will not maintain state across
-	 * restarts of the client, the server or the connection. This means
-	 * <ul>
-	 * <li>Message delivery to the specified QOS cannot be maintained if the client,
-	 * server or connection are restarted
-	 * <li>The server will treat a subscription as non-durable
-	 * </ul>
+	 * <li>A new connection is made with the client and with the cleanStart flag set
+	 * to true.</li>
+	 * <li>The Session expiry interval is exceeded after the network connection is
+	 * closed, see {@link MqttConnectionOptions#setSessionExpiryInterval}</li>
 	 * </ul>
 	 * 
-	 * @param cleanSession
+	 * If set to true, the server will immediately drop any existing session state
+	 * for the given client and will initiate a new session.
+	 * 
+	 * In order to implement QoS 1 and QoS 2 protocol flows the Client and Server
+	 * need to associate state with the Client Identifier, this is referred to as
+	 * the Session State. The Server also stores the subscriptions as part of the
+	 * Session State.
+	 * 
+	 * The session can continue across a sequence of Network Connections. It lasts
+	 * as long as the latest Network Connection plus the Session Expiry Interval.
+	 * 
+	 * The Session State in the Client consists of:
+	 * 
+	 * <ul>
+	 * <li>QoS 1 and QoS 2 messages which have been sent to the Server, but have not
+	 * been completely acknowledged.</li>
+	 * <li>QoS 2 messages which have been received from the Server, but have not
+	 * been completely acknowledged.</li>
+	 * </ul>
+	 * 
+	 * The Session State in the Server consists of:
+	 * <ul>
+	 * <li>The existence of a Session, even if the rest of the Session State is
+	 * empty.</li>
+	 * <li>The Clients subscriptions, including any Subscription Identifiers.</li>
+	 * <li>QoS 1 and QoS 2 messages which have been sent to the Client, but have not
+	 * been completely acknowledged.</li>
+	 * <li>QoS 1 and QoS 2 messages pending transmission to the Client and
+	 * OPTIONALLY QoS 0 messages pending transmission to the Client.</li>
+	 * <li>QoS 2 messages which have been received from the Client, but have not
+	 * been completely acknowledged.The Will Message and the Will Delay
+	 * Interval</li>
+	 * <li>If the Session is currently not connected, the time at which the Session
+	 * will end and Session State will be discarded.</li>
+	 * </ul>
+	 * 
+	 * Retained messages do not form part of the Session State in the Server, they
+	 * are not deleted as a result of a Session ending.
+	 * 
+	 * 
+	 * 
+	 * @param cleanStart
 	 *            Set to True to enable cleanSession
 	 */
-	public void setCleanSession(boolean cleanSession) {
-		this.cleanSession = cleanSession;
+	public void setCleanStart(boolean cleanStart) {
+		this.cleanStart = cleanStart;
 	}
 
 	/**
@@ -274,7 +305,7 @@ public class MqttConnectionOptions {
 	 * @throws IllegalArgumentException
 	 *             if the keepAliveInterval was invalid
 	 */
-	public void setKeepAliveInterval(int keepAliveInterval){
+	public void setKeepAliveInterval(int keepAliveInterval) {
 		if (keepAliveInterval < 0) {
 			throw new IllegalArgumentException();
 		}
@@ -309,21 +340,23 @@ public class MqttConnectionOptions {
 	}
 
 	/**
-	* Get the maximum time (in millis) to wait between reconnects
-	* @return Get the maximum time (in millis) to wait between reconnects
-	*/
+	 * Get the maximum time (in millis) to wait between reconnects
+	 * 
+	 * @return Get the maximum time (in millis) to wait between reconnects
+	 */
 	public int getMaxReconnectDelay() {
 		return maxReconnectDelay;
 	}
 
 	/**
 	 * Set the maximum time to wait between reconnects
-	 * @param maxReconnectDelay the duration (in millis)
-	*/
+	 * 
+	 * @param maxReconnectDelay
+	 *            the duration (in millis)
+	 */
 	public void setMaxReconnectDelay(int maxReconnectDelay) {
 		this.maxReconnectDelay = maxReconnectDelay;
 	}
-
 
 	/**
 	 * Return a list of serverURIs the client may connect to
@@ -367,7 +400,7 @@ public class MqttConnectionOptions {
 	 * connects to.
 	 * </p>
 	 * <p>
-	 * The cleansession flag must be set to false if durable subscriptions and/or
+	 * The cleanStart flag must be set to false if durable subscriptions and/or
 	 * reliable message delivery is required.
 	 * </p>
 	 * </li>
@@ -375,20 +408,20 @@ public class MqttConnectionOptions {
 	 * <p>
 	 * A set of servers may be specified that are not "equal" (as in the high
 	 * availability option). As no state is shared across the servers reliable
-	 * message delivery and durable subscriptions are not valid. The cleansession
-	 * flag must be set to true if the hunt list mode is used
+	 * message delivery and durable subscriptions are not valid. The cleanStart flag
+	 * must be set to true if the hunt list mode is used
 	 * </p>
 	 * </li>
 	 * </ol>
 	 * 
-	 * @param array
-	 *            of serverURIs
+	 * @param serverURIs
+	 *            to be used by the client
 	 */
-	public void setServerURIs(String[] array) {
-		for (int i = 0; i < array.length; i++) {
-			validateURI(array[i]);
+	public void setServerURIs(String[] serverURIs) {
+		for (String serverURI : serverURIs) {
+			NetworkModuleService.validateURI(serverURI);
 		}
-		this.serverURIs = array;
+		this.serverURIs = serverURIs.clone();
 	}
 
 	/**
@@ -494,7 +527,6 @@ public class MqttConnectionOptions {
 	public void setSessionExpiryInterval(Long sessionExpiryInterval) {
 		this.sessionExpiryInterval = sessionExpiryInterval;
 	}
-
 
 	/**
 	 * Returns the Receive Maximum value. If <code>null</code>, it will default to
@@ -704,39 +736,6 @@ public class MqttConnectionOptions {
 	}
 
 	/**
-	 * Validate a URI
-	 * 
-	 * @param srvURI
-	 *            The Server URI
-	 * @return the URI type
-	 */
-	public static UriType validateURI(String srvURI) {
-		try {
-			URI vURI = new URI(srvURI);
-			if ("ws".equals(vURI.getScheme())) {
-				return UriType.WS;
-			} else if ("wss".equals(vURI.getScheme())) {
-				return UriType.WSS;
-			}
-
-			if ((vURI.getPath() == null) || vURI.getPath().isEmpty()) {
-				// No op path must be empty
-			} else {
-				throw new IllegalArgumentException(srvURI);
-			}
-			if ("tcp".equals(vURI.getScheme())) {
-				return UriType.TCP;
-			} else if ("ssl".equals(vURI.getScheme())) {
-				return UriType.SSL;
-			} else {
-				throw new IllegalArgumentException(srvURI);
-			}
-		} catch (URISyntaxException ex) {
-			throw new IllegalArgumentException(srvURI);
-		}
-	}
-
-	/**
 	 * Returns the socket factory that will be used when connecting, or
 	 * <code>null</code> if one has not been set.
 	 * 
@@ -900,11 +899,9 @@ public class MqttConnectionOptions {
 		return httpsHostnameVerificationEnabled;
 	}
 
-
 	public void setHttpsHostnameVerificationEnabled(boolean httpsHostnameVerificationEnabled) {
 		this.httpsHostnameVerificationEnabled = httpsHostnameVerificationEnabled;
 	}
-
 
 	/**
 	 * @return The Debug Properties
@@ -913,7 +910,7 @@ public class MqttConnectionOptions {
 		final String strNull = "null";
 		Properties p = new Properties();
 		p.put("MqttVersion", getMqttVersion());
-		p.put("CleanSession", Boolean.valueOf(isCleanSession()));
+		p.put("CleanStart", Boolean.valueOf(isCleanStart()));
 		p.put("ConTimeout", getConnectionTimeout());
 		p.put("KeepAliveInterval", getKeepAliveInterval());
 		p.put("UserName", (getUserName() == null) ? strNull : getUserName());
@@ -931,6 +928,20 @@ public class MqttConnectionOptions {
 		return p;
 	}
 
+	/**
+	 * Sets the Custom WebSocket Headers for the WebSocket Connection.
+	 *
+	 * @param headers
+	 *            The custom websocket headers {@link Properties}
+	 */
+	public void setCustomWebSocketHeaders(Map<String, String> headers) {
+		this.customWebSocketHeaders = Collections.unmodifiableMap(headers);
+	}
+
+	public Map<String, String> getCustomWebSocketHeaders() {
+		return customWebSocketHeaders;
+	}
+
 	public String toString() {
 		return Debug.dumpProperties(getDebug(), "Connection options");
 	}
@@ -939,13 +950,26 @@ public class MqttConnectionOptions {
 		return CLIENT_ID_PREFIX + System.nanoTime();
 	}
 
-
 	public boolean isSendReasonMessages() {
 		return sendReasonMessages;
 	}
 
-
 	public void setSendReasonMessages(boolean sendReasonMessages) {
 		this.sendReasonMessages = sendReasonMessages;
+	}
+
+	public int getExecutorServiceTimeout() {
+		return executorServiceTimeout;
+	}
+
+	/**
+	 * Set the time in seconds that the executor service should wait when
+	 * terminating before forcefully terminating. It is not recommended to change
+	 * this value unless you are absolutely sure that you need to.
+	 * 
+	 * @param executorServiceTimeout the time in seconds to wait when shutting down.Ï
+	 */
+	public void setExecutorServiceTimeout(int executorServiceTimeout) {
+		this.executorServiceTimeout = executorServiceTimeout;
 	}
 }

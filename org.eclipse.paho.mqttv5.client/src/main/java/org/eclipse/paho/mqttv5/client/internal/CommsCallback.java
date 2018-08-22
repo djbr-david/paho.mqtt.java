@@ -32,7 +32,6 @@ import org.eclipse.paho.mqttv5.client.MqttCallback;
 import org.eclipse.paho.mqttv5.client.MqttDeliveryToken;
 import org.eclipse.paho.mqttv5.client.MqttDisconnectResponse;
 import org.eclipse.paho.mqttv5.client.MqttToken;
-import org.eclipse.paho.mqttv5.client.MqttTopic;
 import org.eclipse.paho.mqttv5.client.logging.Logger;
 import org.eclipse.paho.mqttv5.client.logging.LoggerFactory;
 import org.eclipse.paho.mqttv5.common.MqttException;
@@ -45,6 +44,7 @@ import org.eclipse.paho.mqttv5.common.packet.MqttPubComp;
 import org.eclipse.paho.mqttv5.common.packet.MqttPublish;
 import org.eclipse.paho.mqttv5.common.packet.MqttReturnCode;
 import org.eclipse.paho.mqttv5.common.packet.UserProperty;
+import org.eclipse.paho.mqttv5.common.util.MqttTopicValidator;
 
 /**
  * Bridge between Receiver and the external API. This class gets called by
@@ -264,7 +264,13 @@ public class CommsCallback implements Runnable {
 				// If a callback is registered and delivery has finished
 				// call delivery complete callback.
 				if (mqttCallback != null && token instanceof MqttDeliveryToken && token.isComplete()) {
-					mqttCallback.deliveryComplete((MqttDeliveryToken) token);
+					try {
+						mqttCallback.deliveryComplete((MqttDeliveryToken) token);
+					} catch (Throwable ex) {
+						// Just log the fact that an exception was thrown
+						// @TRACE 726=Ignoring Exception thrown from deliveryComplete {0}
+						log.fine(CLASS_NAME, methodName, "726", new Object[] { ex });
+					}
 				}
 				// Now call async action completion callbacks
 				fireActionEvent(token);
@@ -302,7 +308,8 @@ public class CommsCallback implements Runnable {
 				// @TRACE 722=Server initiated disconnect, connection closed. Disconnect={0}
 				log.fine(CLASS_NAME, methodName, "722", new Object[] { message.toString() });
 				MqttDisconnectResponse disconnectResponse = new MqttDisconnectResponse(message.getReturnCode(),
-						message.getProperties().getReasonString(), (ArrayList<UserProperty>) message.getProperties().getUserProperties(),
+						message.getProperties().getReasonString(),
+						(ArrayList<UserProperty>) message.getProperties().getUserProperties(),
 						message.getProperties().getServerReference());
 				mqttCallback.disconnected(disconnectResponse);
 			} else if (mqttCallback != null && cause != null) {
@@ -317,9 +324,8 @@ public class CommsCallback implements Runnable {
 				reconnectInternalCallback.disconnected(disconnectResponse);
 			}
 		} catch (Throwable t) {
-			// Just log the fact that a throwable has caught connection lost
-			// is called during shutdown processing so no need to do anything else
-			// @TRACE 720=exception from connectionLost {0}
+			// Just log the fact that an exception was thrown
+			// @TRACE 720=Ignoring Exception thrown from connectionLost {0}
 			log.fine(CLASS_NAME, methodName, "720", new Object[] { t });
 		}
 	}
@@ -385,14 +391,23 @@ public class CommsCallback implements Runnable {
 			}
 		}
 	}
-	
+
 	/**
 	 * This method is called when an Auth Message is received.
-	 * @param authMessage The {@link MqttAuth} message.
+	 * 
+	 * @param authMessage
+	 *            The {@link MqttAuth} message.
 	 */
 	public void authMessageReceived(MqttAuth authMessage) {
-		if(mqttCallback != null) {
-			mqttCallback.authPacketArrived(authMessage.getReturnCode(), authMessage.getProperties());
+		String methodName = "authMessageReceived";
+		if (mqttCallback != null) {
+			try {
+				mqttCallback.authPacketArrived(authMessage.getReturnCode(), authMessage.getProperties());
+			} catch (Throwable ex) {
+				// Just log the fact that an exception was thrown
+				// @TRACE 727=Ignoring Exception thrown from authPacketArrived {0}
+				log.fine(CLASS_NAME, methodName, "727", new Object[] { ex });
+			}
 		}
 	}
 
@@ -408,7 +423,13 @@ public class CommsCallback implements Runnable {
 		final String methodName = "mqttErrorOccurred";
 		log.warning(CLASS_NAME, methodName, "721", new Object[] { exception.getMessage() });
 		if (mqttCallback != null) {
-			mqttCallback.mqttErrorOccurred(exception);
+			try {
+				mqttCallback.mqttErrorOccurred(exception);
+			} catch (Exception ex) {
+				// Just log the fact that an exception was thrown
+				// @TRACE 724=Ignoring Exception thrown from mqttErrorOccurred: {0}
+				log.fine(CLASS_NAME, methodName, "724", new Object[] { ex });
+			}
 		}
 	}
 
@@ -427,11 +448,11 @@ public class CommsCallback implements Runnable {
 			spaceAvailable.notifyAll();
 		}
 	}
-	
+
 	boolean areQueuesEmpty() {
-	    synchronized (workAvailable) {
-	        return completeQueue.isEmpty() && messageQueue.isEmpty();    
-	    }
+		synchronized (workAvailable) {
+			return completeQueue.isEmpty() && messageQueue.isEmpty();
+		}
 	}
 
 	public boolean isQuiesced() {
@@ -441,34 +462,31 @@ public class CommsCallback implements Runnable {
 	private void handleMessage(MqttPublish publishMessage) throws Exception {
 		final String methodName = "handleMessage";
 		// If quisecing process any pending messages.
-
 		String destName = publishMessage.getTopicName();
 
 		// @TRACE 713=call messageArrived key={0} topic={1}
 		log.fine(CLASS_NAME, methodName, "713", new Object[] { new Integer(publishMessage.getMessageId()), destName });
 		deliverMessage(destName, publishMessage.getMessageId(), publishMessage.getMessage());
 
-		if (!this.manualAcks) {
-			if (publishMessage.getMessage().getQos() == 1) {
-				this.clientComms.internalSend(
-						new MqttPubAck(MqttReturnCode.RETURN_CODE_SUCCESS, publishMessage.getMessageId(), new MqttProperties()),
-						new MqttToken(clientComms.getClient().getClientId()));
-			} else if (publishMessage.getMessage().getQos() == 2) {
-				this.clientComms.deliveryComplete(publishMessage);
-				MqttPubComp pubComp = new MqttPubComp(MqttReturnCode.RETURN_CODE_SUCCESS,
-						publishMessage.getMessageId(), new MqttProperties());
-				this.clientComms.internalSend(pubComp, new MqttToken(clientComms.getClient().getClientId()));
-			}
+		// If we are not in manual ACK mode:
+		if (!this.manualAcks && publishMessage.getMessage().getQos() == 1) {
+			this.clientComms.internalSend(new MqttPubAck(MqttReturnCode.RETURN_CODE_SUCCESS,
+					publishMessage.getMessageId(), new MqttProperties()),
+					new MqttToken(clientComms.getClient().getClientId()));
 		}
 	}
 
 	public void messageArrivedComplete(int messageId, int qos) throws MqttException {
 		if (qos == 1) {
-			this.clientComms.internalSend(new MqttPubAck(MqttReturnCode.RETURN_CODE_SUCCESS, messageId, new MqttProperties()),
+			this.clientComms.internalSend(
+					new MqttPubAck(MqttReturnCode.RETURN_CODE_SUCCESS, messageId, new MqttProperties()),
 					new MqttToken(clientComms.getClient().getClientId()));
 		} else if (qos == 2) {
 			this.clientComms.deliveryComplete(messageId);
 			MqttPubComp pubComp = new MqttPubComp(MqttReturnCode.RETURN_CODE_SUCCESS, messageId, new MqttProperties());
+			// @TRACE 723=Creating MqttPubComp due to manual ACK: {0}
+			log.info(CLASS_NAME, "messageArrivedComplete", "723", new Object[] { pubComp.toString() });
+
 			this.clientComms.internalSend(pubComp, new MqttToken(clientComms.getClient().getClientId()));
 		}
 	}
@@ -573,11 +591,12 @@ public class CommsCallback implements Runnable {
 
 	protected boolean deliverMessage(String topicName, int messageId, MqttMessage aMessage) throws Exception {
 		boolean delivered = false;
+		String methodName = "deliverMessage";
 
 		if (aMessage.getProperties().getSubscriptionIdentifiers().isEmpty()) {
 			// No Subscription IDs, use topic filter matching
 			for (Map.Entry<String, Integer> entry : this.callbackTopicMap.entrySet()) {
-				if (MqttTopic.isMatched(entry.getKey(), topicName)) {
+				if (MqttTopicValidator.isMatched(entry.getKey(), topicName)) {
 					aMessage.setId(messageId);
 					this.callbackMap.get(entry.getValue()).messageArrived(topicName, aMessage);
 					delivered = true;
@@ -602,7 +621,13 @@ public class CommsCallback implements Runnable {
 		 */
 		if (mqttCallback != null && !delivered) {
 			aMessage.setId(messageId);
-			mqttCallback.messageArrived(topicName, aMessage);
+			try {
+				mqttCallback.messageArrived(topicName, aMessage);
+			} catch (Exception ex) {
+				// Just log the fact that an exception was thrown
+				// @TRACE 725=Ignoring Exception thrown from messageArrived: {0}
+				log.fine(CLASS_NAME, methodName, "725", new Object[] { ex });
+			}
 			delivered = true;
 		}
 

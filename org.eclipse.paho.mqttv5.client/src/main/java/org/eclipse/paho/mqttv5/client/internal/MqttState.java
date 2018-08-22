@@ -66,8 +66,6 @@ public interface MqttState {
 	 */
 	MqttToken checkForActivity(MqttActionListener pingCallback) throws MqttException;
 
-	void setKeepAliveInterval(long interval);
-
 	void notifySentBytes(int sentBytesCount);
 
 	void notifyReceivedBytes(int receivedBytesCount);
@@ -108,5 +106,9 @@ public interface MqttState {
 	int getActualInFlight();
 
 	Properties getDebug();
+
+	Long getOutgoingMaximumPacketSize();
+
+	Long getIncomingMaximumPacketSize();
 
 }
