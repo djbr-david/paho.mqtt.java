@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2009, 2016 IBM Corp.
+ * Copyright (c) 2009, 2018 IBM Corp.
  *
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Eclipse Public License v1.0
@@ -44,6 +44,7 @@ import org.eclipse.paho.client.mqttv3.logging.LoggerFactory;
 import org.eclipse.paho.client.mqttv3.persist.MemoryPersistence;
 import org.eclipse.paho.client.mqttv3.persist.MqttDefaultFilePersistence;
 import org.eclipse.paho.client.mqttv3.util.Debug;
+import org.eclipse.paho.client.mqttv3.IMqttToken;
 
 /**
  * Lightweight client for talking to an MQTT server using non-blocking methods
@@ -91,7 +92,7 @@ import org.eclipse.paho.client.mqttv3.util.Debug;
  */
 public class MqttAsyncClient implements IMqttAsyncClient {
 	private static final String CLASS_NAME = MqttAsyncClient.class.getName();
-	private static final Logger log = LoggerFactory.getLogger(LoggerFactory.MQTT_CLIENT_MSG_CAT, CLASS_NAME);
+	private Logger log = LoggerFactory.getLogger(LoggerFactory.MQTT_CLIENT_MSG_CAT, CLASS_NAME);
 
 	private static final String CLIENT_ID_PREFIX = "paho";
 	private static final long QUIESCE_TIMEOUT = 30000; // ms
@@ -420,8 +421,7 @@ public class MqttAsyncClient implements IMqttAsyncClient {
 	 * @param pingSender
 	 *            Custom {@link MqttPingSender} implementation.
 	 * @param executorService
-	 *            used for managing threads. If null then a newScheduledThreadPool
-	 *            is used.
+	 *            used for managing threads. If null no executor service is used.
 	 * @throws IllegalArgumentException
 	 *             if the URI does not start with "tcp://", "ssl://" or
 	 *             "local://"
@@ -462,9 +462,6 @@ public class MqttAsyncClient implements IMqttAsyncClient {
 		}
 
 		this.executorService = executorService;
-		if (this.executorService == null) {
-			this.executorService = Executors.newScheduledThreadPool(10);
-		}
 
 		// @TRACE 101=<init> ClientID={0} ServerURI={1} PersistenceType={2}
 		log.fine(CLASS_NAME, methodName, "101", new Object[] { clientId, serverURI, persistence });
@@ -925,7 +922,6 @@ public class MqttAsyncClient implements IMqttAsyncClient {
 	 */
 	public IMqttToken subscribe(String[] topicFilters, int[] qos, Object userContext, IMqttActionListener callback)
 			throws MqttException {
-		final String methodName = "subscribe";
 
 		if (topicFilters.length != qos.length) {
 			throw new IllegalArgumentException();
@@ -937,7 +933,14 @@ public class MqttAsyncClient implements IMqttAsyncClient {
 			MqttTopic.validate(topicFilters[i], true/* allow wildcards */);
 			this.comms.removeMessageListener(topicFilters[i]);
 		}
+		
+		return this.subscribeBase(topicFilters, qos, userContext, callback);
+	}
 
+	private IMqttToken subscribeBase(String[] topicFilters, int[] qos, Object userContext, IMqttActionListener callback)
+			throws MqttException {
+		final String methodName = "subscribe";
+				
 		// Only Generate Log string if we are logging at FINE level
 		if (log.isLoggable(Logger.FINE)) {
 			StringBuffer subs = new StringBuffer();
@@ -945,9 +948,7 @@ public class MqttAsyncClient implements IMqttAsyncClient {
 				if (i > 0) {
 					subs.append(", ");
 				}
-				subs.append("topic=").append(topicFilters[i]).append(" qos=").append(qos[i]);
-
-				
+				subs.append("topic=").append(topicFilters[i]).append(" qos=").append(qos[i]);			
 			}
 			// @TRACE 106=Subscribe topicFilter={0} userContext={1} callback={2}
 			log.fine(CLASS_NAME, methodName, "106", new Object[] { subs.toString(), userContext, callback });
@@ -1007,15 +1008,14 @@ public class MqttAsyncClient implements IMqttAsyncClient {
 	public IMqttToken subscribe(String[] topicFilters, int[] qos, Object userContext, IMqttActionListener callback,
 			IMqttMessageListener[] messageListeners) throws MqttException {
 
-		if ((messageListeners.length != qos.length) || (qos.length != topicFilters.length)) {
+		if (messageListeners != null && (messageListeners.length != qos.length) || (qos.length != topicFilters.length)) {
 			throw new IllegalArgumentException();
 		}
 
-		IMqttToken token = this.subscribe(topicFilters, qos, userContext, callback);
-
 		// add or remove message handlers to the list for this client
 		for (int i = 0; i < topicFilters.length; ++i) {
-            if (messageListeners[i] == null) {
+			MqttTopic.validate(topicFilters[i], true/* allow wildcards */);
+            if (messageListeners == null || messageListeners[i] == null) {
                 this.comms.removeMessageListener(topicFilters[i]);
             }
             else {
@@ -1023,6 +1023,16 @@ public class MqttAsyncClient implements IMqttAsyncClient {
             }
 		}
 
+		IMqttToken token = null;
+		try 	{
+			token = this.subscribeBase(topicFilters, qos, userContext, callback);
+		} catch(Exception e) {
+			// if the subscribe fails, then we have to remove the message handlers
+			for (int i = 0; i < topicFilters.length; ++i) {
+				this.comms.removeMessageListener(topicFilters[i]);
+			}
+			throw e;
+		}
 		return token;
 	}
 

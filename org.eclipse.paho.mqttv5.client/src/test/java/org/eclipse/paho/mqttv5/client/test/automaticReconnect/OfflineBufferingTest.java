@@ -24,6 +24,7 @@ import org.eclipse.paho.mqttv5.common.MqttException;
 import org.eclipse.paho.mqttv5.common.MqttMessage;
 import org.eclipse.paho.mqttv5.common.packet.MqttProperties;
 import org.eclipse.paho.mqttv5.common.packet.MqttPublish;
+import org.junit.After;
 import org.junit.Assert;
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -63,6 +64,12 @@ public class OfflineBufferingTest {
 		}
 
 	}
+	
+	@After
+	public void clearUpAfterTest() {
+		proxy.disableProxy();
+	}
+
 
 	/**
 	 * Tests that A message can be buffered whilst the client is in a
@@ -150,17 +157,21 @@ public class OfflineBufferingTest {
 		// Tokens
 		IMqttToken connectToken;
 
+		int msg_count = 1000;
+		
 		// Client Options
 		MqttConnectionOptions options = new MqttConnectionOptions();
 		options.setCleanStart(true);
 		options.setAutomaticReconnect(true);
+		
 		MqttAsyncClient client = new MqttAsyncClient("tcp://localhost:" + proxy.getLocalPort(), methodName, DATA_STORE);
 		DisconnectedBufferOptions disconnectedOpts = new DisconnectedBufferOptions();
+		disconnectedOpts.setBufferSize(msg_count);
 		disconnectedOpts.setBufferEnabled(true);
 		client.setBufferOpts(disconnectedOpts);
-
+		
 		// Create subscription client that won't be affected by proxy
-		MqttAsyncClient subClient = new MqttAsyncClient(serverURIString, methodName + "sub-client");
+		MqttAsyncClient subClient = new MqttAsyncClient(serverURIString, methodName + "sub-client", new TestMemoryPersistence());
 		MqttV5Receiver mqttV3Receiver = new MqttV5Receiver(clientId, LoggingUtilities.getPrintStream());
 		subClient.setCallback(mqttV3Receiver);
 		IMqttToken subConnectToken = subClient.connect();
@@ -182,8 +193,8 @@ public class OfflineBufferingTest {
 		log.info("Proxy Disconnect isConnected: " + isConnected);
 		Assert.assertFalse(isConnected);
 
-		// Publish 100 messages
-		for (int x = 0; x < 100; x++) {
+		// Publish some messages
+		for (int x = 0; x < msg_count; x++) {
 			client.publish(topicPrefix + methodName, new MqttMessage(Integer.toString(x).getBytes()));
 		}
 		// Enable Proxy
@@ -212,11 +223,11 @@ public class OfflineBufferingTest {
 		Thread.sleep(5000);
 
 		// Check that all messages have been delivered
-		for (int x = 0; x < 100; x++) {
-			boolean recieved = mqttV3Receiver.validateReceipt(topicPrefix + methodName, 0, Integer.toString(x).getBytes());
-			Assert.assertTrue(recieved);
+		for (int x = 0; x < msg_count; x++) {
+			boolean received = mqttV3Receiver.validateReceipt(topicPrefix + methodName, 0, Integer.toString(x).getBytes());
+			Assert.assertTrue(received);
 		}
-		log.info("All messages sent and Recieved correctly.");
+		log.info("All messages sent and received correctly.");
 		IMqttToken disconnectToken = client.disconnect();
 		disconnectToken.waitForCompletion(5000);
 		client.close();
@@ -431,7 +442,7 @@ public class OfflineBufferingTest {
 		// Create Subscription client to watch for the message being published
 		// as soon as the main client connects
 		log.info("Creating subscription client");
-		MqttAsyncClient subClient = new MqttAsyncClient(serverURIString, clientId);
+		MqttAsyncClient subClient = new MqttAsyncClient(serverURIString, clientId, new TestMemoryPersistence());
 		MqttV5Receiver mqttV3Receiver = new MqttV5Receiver(clientId, LoggingUtilities.getPrintStream());
 		subClient.setCallback(mqttV3Receiver);
 		IMqttToken subConnectToken = subClient.connect();

@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2009, 2016 IBM Corp.
+ * Copyright (c) 2009, 2019 IBM Corp.
  *
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Eclipse Public License v1.0
@@ -11,12 +11,7 @@
  *   http://www.eclipse.org/org/documents/edl-v10.php.
  *
  * Contributors:
- *    Dave Locke - initial API and implementation and/or initial documentation
- *    Ian Craggs - MQTT 3.1.1 support
- *    Ian Craggs - per subscription message handlers (bug 466579)
- *    Ian Craggs - ack control (bug 472172)
- *    James Sutton - Bug 459142 - WebSocket support for the Java client.
- *    James Sutton - Automatic Reconnect & Offline Buffering.
+ *    James Sutton - initial API and implementation and/or initial documentation
  */
 
 package org.eclipse.paho.mqttv5.client;
@@ -38,11 +33,11 @@ import org.eclipse.paho.mqttv5.client.internal.MqttConnectionState;
 import org.eclipse.paho.mqttv5.client.internal.MqttSessionState;
 import org.eclipse.paho.mqttv5.client.internal.NetworkModule;
 import org.eclipse.paho.mqttv5.client.internal.NetworkModuleService;
-import org.eclipse.paho.mqttv5.client.logging.Logger;
-import org.eclipse.paho.mqttv5.client.logging.LoggerFactory;
 import org.eclipse.paho.mqttv5.client.persist.MemoryPersistence;
 import org.eclipse.paho.mqttv5.client.persist.MqttDefaultFilePersistence;
 import org.eclipse.paho.mqttv5.client.util.Debug;
+import org.eclipse.paho.mqttv5.client.logging.Logger;
+import org.eclipse.paho.mqttv5.client.logging.LoggerFactory;
 import org.eclipse.paho.mqttv5.common.ExceptionHelper;
 import org.eclipse.paho.mqttv5.common.MqttException;
 import org.eclipse.paho.mqttv5.common.MqttMessage;
@@ -225,7 +220,7 @@ import org.eclipse.paho.mqttv5.common.util.MqttTopicValidator;
  */
 public class MqttAsyncClient implements MqttClientInterface, IMqttAsyncClient {
 	private static final String CLASS_NAME = MqttAsyncClient.class.getName();
-	private static final Logger log = LoggerFactory.getLogger(LoggerFactory.MQTT_CLIENT_MSG_CAT, CLASS_NAME);
+	private Logger log = LoggerFactory.getLogger(LoggerFactory.MQTT_CLIENT_MSG_CAT, CLASS_NAME);
 
 	private static final long QUIESCE_TIMEOUT = 30000; // ms
 	private static final long DISCONNECT_TIMEOUT = 10000; // ms
@@ -294,9 +289,7 @@ public class MqttAsyncClient implements MqttClientInterface, IMqttAsyncClient {
 	 * connecting to a server if durable subscriptions or reliable messaging are
 	 * required.
 	 * <p>
-	 * A convenience method is provided to generate a random client id that should
-	 * satisfy this criteria - {@link MqttConnectionOptions#generateClientId()}. As
-	 * the client identifier is used by the server to identify a client when it
+	 * As the client identifier is used by the server to identify a client when it
 	 * reconnects, the client must use the same identifier between connections if
 	 * durable subscriptions or reliable delivery of messages is required.
 	 * </p>
@@ -385,9 +378,7 @@ public class MqttAsyncClient implements MqttClientInterface, IMqttAsyncClient {
 	 * connecting to a server if durable subscriptions or reliable messaging are
 	 * required.
 	 * <p>
-	 * A convenience method is provided to generate a random client id that should
-	 * satisfy this criteria - {@link MqttConnectionOptions#generateClientId()}. As
-	 * the client identifier is used by the server to identify a client when it
+	 * As the client identifier is used by the server to identify a client when it
 	 * reconnects, the client must use the same identifier between connections if
 	 * durable subscriptions or reliable delivery of messages is required.
 	 * </p>
@@ -488,9 +479,7 @@ public class MqttAsyncClient implements MqttClientInterface, IMqttAsyncClient {
 	 * connecting to a server if durable subscriptions or reliable messaging are
 	 * required.
 	 * <p>
-	 * A convenience method is provided to generate a random client id that should
-	 * satisfy this criteria - {@link MqttConnectionOptions#generateClientId()}. As
-	 * the client identifier is used by the server to identify a client when it
+	 * As the client identifier is used by the server to identify a client when it
 	 * reconnects, the client must use the same identifier between connections if
 	 * durable subscriptions or reliable delivery of messages is required.
 	 * </p>
@@ -590,9 +579,6 @@ public class MqttAsyncClient implements MqttClientInterface, IMqttAsyncClient {
 		}
 
 		this.executorService = executorService;
-		if (this.executorService == null) {
-			this.executorService = Executors.newScheduledThreadPool(10);
-		}
 
 		this.pingSender = pingSender;
 		if (this.pingSender == null) {
@@ -970,7 +956,7 @@ public class MqttAsyncClient implements MqttClientInterface, IMqttAsyncClient {
 	 * <ul>
 	 * <li>{@link MqttAsyncClient#publish(String, MqttMessage)} to publish a message
 	 * in a non-blocking manner or</li>
-	 * <li>{@link MqttLegacyBlockingClient#publish(String, MqttMessage)} to publish
+	 * <li>{@link MqttClient#publish(String, MqttMessage)} to publish
 	 * a message in a blocking manner</li>
 	 * </ul>
 	 * <p>
@@ -1063,6 +1049,16 @@ public class MqttAsyncClient implements MqttClientInterface, IMqttAsyncClient {
 		return this.subscribe(new MqttSubscription[] { new MqttSubscription(topicFilter, qos) }, userContext, callback,
 				new MqttProperties());
 	}
+	
+	@Override
+	public IMqttToken subscribe(String[] topicFilters, int[] qoss, Object userContext, MqttActionListener callback)
+			throws MqttException {
+		MqttSubscription[] subs = new MqttSubscription[topicFilters.length];
+		for (int i = 0; i < topicFilters.length; ++ i) {
+			subs[i] = new MqttSubscription(topicFilters[i], qoss[i]);
+		}
+		return this.subscribe(subs, userContext, callback, new MqttProperties());
+	}
 
 	/*
 	 * (non-Javadoc)
@@ -1075,6 +1071,11 @@ public class MqttAsyncClient implements MqttClientInterface, IMqttAsyncClient {
 	public IMqttToken subscribe(String topicFilter, int qos) throws MqttException {
 		return this.subscribe(new MqttSubscription[] { new MqttSubscription(topicFilter, qos) }, null, null,
 				new MqttProperties());
+	}
+	
+	@Override
+	public IMqttToken subscribe(String[] topicFilters, int[] qoss) throws MqttException {
+		return this.subscribe(topicFilters, qoss, null, null);
 	}
 
 	/*
@@ -1113,7 +1114,6 @@ public class MqttAsyncClient implements MqttClientInterface, IMqttAsyncClient {
 	@Override
 	public IMqttToken subscribe(MqttSubscription[] subscriptions, Object userContext, MqttActionListener callback,
 			MqttProperties subscriptionProperties) throws MqttException {
-		final String methodName = "subscribe";
 
 		// remove any message handlers for individual topics and validate Topics
 		for (int i = 0; i < subscriptions.length; ++i) {
@@ -1123,7 +1123,14 @@ public class MqttAsyncClient implements MqttClientInterface, IMqttAsyncClient {
 					this.mqttConnection.isWildcardSubscriptionsAvailable(),
 					this.mqttConnection.isSharedSubscriptionsAvailable());
 		}
+		
+		return this.subscribeBase(subscriptions, userContext, callback, subscriptionProperties);
+	}
 
+	private IMqttToken subscribeBase(MqttSubscription[] subscriptions, Object userContext, MqttActionListener callback,
+				MqttProperties subscriptionProperties) throws MqttException {
+		final String methodName = "subscribe";
+		
 		// Only Generate Log string if we are logging at FINE level
 		if (log.isLoggable(Logger.FINE)) {
 			StringBuffer subs = new StringBuffer();
@@ -1214,13 +1221,28 @@ public class MqttAsyncClient implements MqttClientInterface, IMqttAsyncClient {
 	public IMqttToken subscribe(MqttSubscription[] subscriptions, Object userContext, MqttActionListener callback,
 			IMqttMessageListener[] messageListeners, MqttProperties subscriptionProperties) throws MqttException {
 
-		IMqttToken token = this.subscribe(subscriptions, userContext, callback, subscriptionProperties);
-
 		// add message handlers to the list for this client
 		for (int i = 0; i < subscriptions.length; ++i) {
-			this.comms.setMessageListener(null, subscriptions[i].getTopic(), messageListeners[i]);
+			MqttTopicValidator.validate(subscriptions[i].getTopic(),
+					this.mqttConnection.isWildcardSubscriptionsAvailable(),
+					this.mqttConnection.isSharedSubscriptionsAvailable());
+			if (messageListeners == null || messageListeners[i] == null) {
+				this.comms.removeMessageListener(subscriptions[i].getTopic());
+			} else {
+				this.comms.setMessageListener(null, subscriptions[i].getTopic(), messageListeners[i]);
+			}
 		}
-
+		
+		IMqttToken token = null;
+		try 	{
+			token = this.subscribeBase(subscriptions, userContext, callback, subscriptionProperties);
+		} catch(Exception e) {
+			// if the subscribe fails, then we have to remove the message handlers
+			for (int i = 0; i < subscriptions.length; ++i) {
+				this.comms.removeMessageListener(subscriptions[i].getTopic());
+			}
+			throw e;
+		}
 		return token;
 	}
 
@@ -1257,14 +1279,29 @@ public class MqttAsyncClient implements MqttClientInterface, IMqttAsyncClient {
 				subId = this.mqttSession.getNextSubscriptionIdentifier();
 			}
 		}
-
-		IMqttToken token = this.subscribe(subscriptions, userContext, callback, subscriptionProperties);
-
+		
 		// add message handlers to the list for this client
 		for (int i = 0; i < subscriptions.length; ++i) {
-			this.comms.setMessageListener(subId, subscriptions[i].getTopic(), messageListener);
+			MqttTopicValidator.validate(subscriptions[i].getTopic(),
+					this.mqttConnection.isWildcardSubscriptionsAvailable(),
+					this.mqttConnection.isSharedSubscriptionsAvailable());
+			if (messageListener == null) {
+				this.comms.removeMessageListener(subscriptions[i].getTopic());
+			} else {
+				this.comms.setMessageListener(subId, subscriptions[i].getTopic(), messageListener);
+			}
 		}
 
+		IMqttToken token = null;
+		try 	{
+			token = this.subscribeBase(subscriptions, userContext, callback, subscriptionProperties);
+		} catch(Exception e) {
+			// if the subscribe fails, then we have to remove the message handlers
+			for (int i = 0; i < subscriptions.length; ++i) {
+				this.comms.removeMessageListener(subscriptions[i].getTopic());
+			}
+			throw e;
+		}
 		return token;
 	}
 

@@ -1,5 +1,5 @@
 /*******************************************************************************
- * Copyright (c) 2016 IBM Corp.
+ * Copyright (c) 2016, 2018 IBM Corp.
  *
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Eclipse Public License v1.0
@@ -29,7 +29,7 @@ import org.eclipse.paho.mqttv5.common.packet.MqttWireMessage;
 public class DisconnectedMessageBuffer implements Runnable {
 	
 	private static final String CLASS_NAME = "DisconnectedMessageBuffer";
-	private static final Logger log = LoggerFactory.getLogger(LoggerFactory.MQTT_CLIENT_MSG_CAT, CLASS_NAME);
+	private Logger log = LoggerFactory.getLogger(LoggerFactory.MQTT_CLIENT_MSG_CAT, CLASS_NAME);
 	private DisconnectedBufferOptions bufferOpts;
 	private ArrayList<BufferedMessage> buffer;
 	private Object	bufLock = new Object();  	// Used to synchronise the buffer
@@ -105,15 +105,21 @@ public class DisconnectedMessageBuffer implements Runnable {
 		log.fine(CLASS_NAME, methodName, "516");
 			while(getMessageCount() > 0){
 				try {
-				BufferedMessage bufferedMessage = getMessage(0);
-				callback.publishBufferedMessage(bufferedMessage);
-				// Publish was successful, remove message from buffer.
-				deleteMessage(0);
+					BufferedMessage bufferedMessage = getMessage(0);
+					callback.publishBufferedMessage(bufferedMessage);
+					// Publish was successful, remove message from buffer.
+					deleteMessage(0);
 				} catch (MqttException ex) {
-					// Error occurred attempting to publish buffered message likely because the client is not connected
-					// @TRACE 517=Error occurred attempting to publish buffered message due to disconnect.
-					log.warning(CLASS_NAME, methodName, "517");
-					break;
+					if (ex.getReasonCode() == MqttClientException.REASON_CODE_MAX_INFLIGHT) {
+						// If we get the max_inflight condition, try again after a short
+						// interval to allow more messages to be completely sent.
+						try { Thread.sleep(100); } catch (Exception e) {}
+					} else {
+						// Error occurred attempting to publish buffered message likely because the client is not connected
+						// @TRACE 519=Error occurred attempting to publish buffered message due to disconnect. Exception: {0}.
+						log.warning(CLASS_NAME, methodName, "519", new Object[]{ex.getMessage()});
+						break;
+					}
 				}
 			}
 	}

@@ -6,7 +6,12 @@ matrix:
     - os: linux
       dist: trusty
       sudo: required
+      jdk: oraclejdk8
 #    - os: osx
+#      jdk: oraclejdk8
+
+
+
 
 sudo: required
 
@@ -15,8 +20,7 @@ before_install:
 
 script:
   - mvn -B clean -q
-  - mvn -B --projects org.eclipse.paho.client.mqttv3,org.eclipse.paho.client.mqttv3.test compile -DskipTests -q
-  - mvn -B --projects org.eclipse.paho.mqttv5.common,org.eclipse.paho.mqttv5.client compile -q
+  - mvn -B --projects org.eclipse.paho.client.mqttv3,org.eclipse.paho.client.mqttv3.test test -q
 
 #addons:
 #  apt:

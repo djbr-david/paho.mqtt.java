@@ -1,7 +1,7 @@
 package org.eclipse.paho.mqttv5.client.internal;
 
 /*******************************************************************************
- * Copyright (c) 2009, 2016 IBM Corp.
+ * Copyright (c) 2009, 2018 IBM Corp.
  *
  * All rights reserved. This program and the accompanying materials
  * are made available under the terms of the Eclipse Public License v1.0
@@ -23,7 +23,6 @@ import java.util.Enumeration;
 import java.util.Properties;
 import java.util.Vector;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.TimeUnit;
 
 import org.eclipse.paho.mqttv5.client.BufferedMessage;
 import org.eclipse.paho.mqttv5.client.IMqttMessageListener;
@@ -38,7 +37,6 @@ import org.eclipse.paho.mqttv5.client.MqttPingSender;
 import org.eclipse.paho.mqttv5.client.MqttToken;
 import org.eclipse.paho.mqttv5.client.MqttTopic;
 import org.eclipse.paho.mqttv5.client.TimerPingSender;
-import org.eclipse.paho.mqttv5.client.alpha.IMqttAsyncClient;
 import org.eclipse.paho.mqttv5.client.logging.Logger;
 import org.eclipse.paho.mqttv5.client.logging.LoggerFactory;
 import org.eclipse.paho.mqttv5.common.MqttException;
@@ -59,7 +57,7 @@ public class ClientComms {
 	public static String VERSION = "${project.version}";
 	public static String BUILD_LEVEL = "L${build.level}";
 	private static final String CLASS_NAME = ClientComms.class.getName();
-	private static final Logger log = LoggerFactory.getLogger(LoggerFactory.MQTT_CLIENT_MSG_CAT, CLASS_NAME);
+	private Logger log = LoggerFactory.getLogger(LoggerFactory.MQTT_CLIENT_MSG_CAT, CLASS_NAME);
 
 	private static final byte CONNECTED = 0;
 	private static final byte CONNECTING = 1;
@@ -93,7 +91,7 @@ public class ClientComms {
 	 * network calls.
 	 *
 	 * @param client
-	 *            The {@link IMqttAsyncClient}
+	 *            The {@link MqttClientInterface}
 	 * @param persistence
 	 *            the {@link MqttClientPersistence} layer.
 	 * @param pingSender
@@ -129,22 +127,6 @@ public class ClientComms {
 		return receiver;
 	}
 
-	private void shutdownExecutorService() {
-		String methodName = "shutdownExecutorService";
-		executorService.shutdown();
-		try {
-			if (!executorService.awaitTermination(conOptions.getExecutorServiceTimeout(), TimeUnit.SECONDS)) {
-				executorService.shutdownNow();
-				if (!executorService.awaitTermination(conOptions.getExecutorServiceTimeout(), TimeUnit.SECONDS)) {
-					log.fine(CLASS_NAME, methodName, "executorService did not terminate");
-				}
-			}
-		} catch (InterruptedException ie) {
-			executorService.shutdownNow();
-			Thread.currentThread().interrupt();
-		}
-	}
-
 	/**
 	 * Sends a message to the server. Does not check if connected this validation
 	 * must be done by invoking routines.
@@ -173,6 +155,7 @@ public class ClientComms {
 			// Persist if needed and send the message
 			this.clientState.send(message, token);
 		} catch (MqttException e) {
+			token.internalTok.setClient(null); // undo client setting on error
 			if (message instanceof MqttPublish) {
 				this.clientState.undo((MqttPublish) message);
 			}
@@ -278,7 +261,8 @@ public class ClientComms {
 				}
 
 				conState = CLOSED;
-				shutdownExecutorService();
+				// Don't shut down an externally supplied executor service 
+				//shutdownExecutorService();
 				// ShutdownConnection has already cleaned most things
 				clientState.close();
 				clientState = null;
@@ -494,7 +478,7 @@ public class ClientComms {
 		// it now. This is done at the end to allow a new connect
 		// to be processed and now throw a currently disconnecting error.
 		// any outstanding tokens and unblock any waiters
-		if (endToken != null & callback != null) {
+		if (endToken != null && callback != null) {
 			callback.asyncOperationComplete(endToken);
 		}
 		if (wasConnected && callback != null) {
@@ -764,7 +748,11 @@ public class ClientComms {
 		}
 
 		void start() {
-			executorService.execute(this);
+			if (executorService == null) {
+				new Thread(this).start();
+			} else {
+				executorService.execute(this);
+			}
 		}
 
 		public void run() {
@@ -829,8 +817,12 @@ public class ClientComms {
 		}
 
 		void start() {
-			threadName = "MQTT Disc: " + getClient().getClientId();
-			executorService.execute(this);
+			threadName = "MQTT Disc: "+getClient().getClientId();
+			if (executorService == null) {
+				new Thread(this).start();
+			} else {
+				executorService.execute(this);
+			}
 		}
 
 		public void run() {
@@ -843,10 +835,19 @@ public class ClientComms {
 			clientState.quiesce(quiesceTimeout);
 			try {
 				internalSend(disconnect, token);
-				token.internalTok.waitUntilSent();
-			} catch (MqttException ex) {
-			} finally {
+				// do not wait if the sender process is not running
+				if (sender != null && sender.isRunning()) {
+					token.internalTok.waitUntilSent();
+				}
+			}
+			catch (MqttException ex) {
+			}
+			finally {
 				token.internalTok.markComplete(null, null);
+				if (sender == null || !sender.isRunning()) {
+					// if the sender process is not running 
+					token.internalTok.notifyComplete();
+				}
 				shutdownConnection(token, null, null);
 			}
 		}
@@ -932,7 +933,11 @@ public class ClientComms {
 			log.fine(CLASS_NAME, methodName, "509");
 
 			disconnectedMessageBuffer.setPublishCallback(new ReconnectDisconnectedBufferCallback(methodName));
-			executorService.execute(disconnectedMessageBuffer);
+			if (executorService == null) {
+				new Thread(disconnectedMessageBuffer).start();
+			} else {
+				executorService.execute(disconnectedMessageBuffer);
+			}
 		}
 	}
 
@@ -946,12 +951,6 @@ public class ClientComms {
 
 		public void publishBufferedMessage(BufferedMessage bufferedMessage) throws MqttException {
 			if (isConnected()) {
-				while (clientState.getActualInFlight() >= (mqttConnection.getReceiveMaximum() - 1)) {
-					// We need to Yield to the other threads to allow the in flight messages to
-					// clear
-					Thread.yield();
-
-				}
 				// @TRACE 510=Publising Buffered message message={0}
 				log.fine(CLASS_NAME, methodName, "510", new Object[] { bufferedMessage.getMessage().getKey() });
 				internalSend(bufferedMessage.getMessage(), bufferedMessage.getToken());
